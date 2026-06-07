@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Runtime data
+data/*.db
+data/*.pickle
+data/*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor / tooling
+.claude/
