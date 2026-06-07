@@ -1,7 +1,10 @@
 import asyncio
 import html
-import os
+import json
 import logging
+import os
+import random
+import time
 import zoneinfo
 from datetime import datetime, timezone
 
@@ -37,6 +40,10 @@ LTA_BASE_URL = "https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival"
 ADMIN_USER_IDS = {
     int(x) for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
 }
+
+_http_client: httpx.AsyncClient | None = None
+_refresh_cooldowns: dict[int, float] = {}
+_REFRESH_COOLDOWN = 3.0
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -99,11 +106,11 @@ def _format_next_bus(bus: dict) -> str:
     return f"{load}{btype} <b>{arrival}</b>"
 
 
-def _format_services(data: dict) -> str:
+async def _format_services(data: dict) -> str:
     services = data.get("Services", [])
     stop_code = data.get("BusStopCode", "")
 
-    desc, road = bus_stops.get_stop_info(stop_code)
+    desc, road = await asyncio.to_thread(bus_stops.get_stop_info, stop_code)
     if desc:
         header = f"🚏 <b>{_h(desc)}</b>\n<i>{_h(road)} · Stop {_h(stop_code)}</i>"
     else:
@@ -185,15 +192,19 @@ def _user_label(u: dict) -> str:
     return f"#{u['id']}"
 
 
+def _split_fav_key(key: str) -> tuple[str, str]:
+    parts = key.split(":", 1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
 async def fetch_arrivals(bus_stop_code: str, service_no: str = "") -> dict:
     params = {"BusStopCode": bus_stop_code}
     if service_no:
         params["ServiceNo"] = service_no
     headers = {"AccountKey": LTA_API_KEY}
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(LTA_BASE_URL, params=params, headers=headers)
-        r.raise_for_status()
-        return r.json()
+    r = await _http_client.get(LTA_BASE_URL, params=params, headers=headers)
+    r.raise_for_status()
+    return r.json()
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +212,6 @@ async def fetch_arrivals(bus_stop_code: str, service_no: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    import random
     quip = random.choice(BOOT_QUIPS)
     text = (
         f"🤖 <b>S.G. Bus Intelligence Online.</b> {quip}\n\n"
@@ -299,7 +309,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
     code = args[0].strip()
-    if not bus_stops.stop_exists(code):
+    if not await asyncio.to_thread(bus_stops.stop_exists, code):
         await update.message.reply_text(
             f"⚠️ Stop <code>{_h(code)}</code> not found in my database. "
             "Check the code or share your location for nearby stops.",
@@ -320,7 +330,7 @@ async def refreshstops_command(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = await update.message.reply_text("⏳ Synchronising bus stop database with LTA…")
     try:
         count = await bus_stops.fetch_and_store(LTA_API_KEY)
-        bus_stops.clear_route_cache()
+        await asyncio.to_thread(bus_stops.clear_route_cache)
         await msg.edit_text(f"✅ Database updated — {count:,} stops registered. Route cache cleared.")
     except Exception as e:
         logger.error("refreshstops error: %s", e)
@@ -352,7 +362,7 @@ def _nearby_buttons(nearby: list[dict], show: int) -> list:
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     loc = update.message.location
     context.user_data["last_location"] = (loc.latitude, loc.longitude)
-    nearby = bus_stops.get_nearby(loc.latitude, loc.longitude)
+    nearby = await asyncio.to_thread(bus_stops.get_nearby, loc.latitude, loc.longitude)
 
     if not nearby:
         await update.message.reply_text(
@@ -394,7 +404,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if not bus_stops.stop_exists(bus_stop_code):
+    if not await asyncio.to_thread(bus_stops.stop_exists, bus_stop_code):
         await update.message.reply_text(
             f"⚠️ Stop <code>{_h(bus_stop_code)}</code> not found in my database. "
             "Check the code or share your location for nearby stops.",
@@ -476,17 +486,14 @@ async def _build_dashboard(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, Inl
             return None
 
     keys = list(favourites.keys())
-    tasks = [
-        safe_fetch(*(k.split(":", 1) + [""])[:2])
-        for k in keys
-    ]
+    tasks = [safe_fetch(*_split_fav_key(k)) for k in keys]
     results = await asyncio.gather(*tasks)
 
     divider = "──────────────────"
     sections = []
     for key, data in zip(keys, results):
-        stop, svc = (key.split(":", 1) + [""])[:2]
-        desc, _ = bus_stops.get_stop_info(stop)
+        stop, svc = _split_fav_key(key)
+        desc, _ = await asyncio.to_thread(bus_stops.get_stop_info, stop)
         stop_name = desc or f"Stop {stop}"
 
         header = f"🚏 <b>{_h(stop_name)}</b>"
@@ -565,7 +572,7 @@ async def _send_arrivals(
         data = await fetch_arrivals(bus_stop_code, service_no)
         services = [svc["ServiceNo"] for svc in data.get("Services", [])]
         await msg.edit_text(
-            _format_services(data),
+            await _format_services(data),
             parse_mode="HTML",
             reply_markup=_arrival_keyboard(bus_stop_code, service_no, services),
         )
@@ -578,6 +585,9 @@ async def _send_arrivals(
     except httpx.RequestError as e:
         logger.error("Network error: %s", e)
         await msg.edit_text("❌ I'm experiencing network difficulties. Please try again momentarily.")
+    except json.JSONDecodeError as e:
+        logger.error("LTA API returned invalid JSON: %s", e)
+        await msg.edit_text("❌ I received an unexpected response from LTA. Please try again.")
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +697,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer("Location data expired. Share your location again.", show_alert=True)
             return
         lat, lon = loc
-        nearby = bus_stops.get_nearby(lat, lon)
+        nearby = await asyncio.to_thread(bus_stops.get_nearby, lat, lon)
         buttons = _nearby_buttons(nearby, show=new_limit)
         await query.edit_message_text(
             f"📍 <b>Proximity scan complete.</b> {len(nearby)} stop(s) within range. Select one to query:",
@@ -718,6 +728,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     service_no = rest[0] if rest else ""
 
     if action in ("refresh", "fav"):
+        uid = query.from_user.id
+        now = time.monotonic()
+        if now - _refresh_cooldowns.get(uid, 0) < _REFRESH_COOLDOWN:
+            await query.answer("Please wait a moment.", show_alert=True)
+            return
+        _refresh_cooldowns[uid] = now
         if action == "fav":
             parts = bus_stop_code.split("-")
             bus_stop_code = parts[0]
@@ -726,11 +742,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             fetched = await fetch_arrivals(bus_stop_code, service_no)
             services = [svc["ServiceNo"] for svc in fetched.get("Services", [])]
             await query.edit_message_text(
-                _format_services(fetched),
+                await _format_services(fetched),
                 parse_mode="HTML",
                 reply_markup=_arrival_keyboard(bus_stop_code, service_no, services),
             )
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError) as e:
             logger.error("Callback fetch error: %s", e)
             await query.edit_message_text("❌ I was unable to reach the transit systems. Please try again.")
 
@@ -740,7 +756,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if key in favourites:
             await query.answer("Already in your registry, sir.", show_alert=True)
         else:
-            desc, road = bus_stops.get_stop_info(bus_stop_code)
+            desc, road = await asyncio.to_thread(bus_stops.get_stop_info, bus_stop_code)
             label = desc if desc else f"Stop {bus_stop_code}"
             if service_no:
                 label += f" · {service_no}"
@@ -756,9 +772,10 @@ async def track_and_block(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user = update.effective_user
     if not user:
         return
-    if bus_stops.is_blocked(user.id):
+    if await asyncio.to_thread(bus_stops.is_blocked, user.id):
         raise ApplicationHandlerStop
-    bus_stops.record_user(
+    await asyncio.to_thread(
+        bus_stops.record_user,
         user.id,
         user.username,
         (user.full_name or "").strip(),
@@ -776,8 +793,11 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _send_admin_home(send_fn) -> None:
-    total = bus_stops.get_user_count()
-    blocked = len(bus_stops.get_blocked_users())
+    total, blocked_list = await asyncio.gather(
+        asyncio.to_thread(bus_stops.get_user_count),
+        asyncio.to_thread(bus_stops.get_blocked_users),
+    )
+    blocked = len(blocked_list)
     text = (
         f"🔧 <b>Admin Panel</b>\n\n"
         f"👥 Users: <b>{total}</b>  ·  🚫 Blocked: <b>{blocked}</b>"
@@ -789,10 +809,12 @@ async def _send_admin_home(send_fn) -> None:
     await send_fn(text, parse_mode="HTML", reply_markup=keyboard)
 
 
-def _users_page_content(page: int) -> tuple[str, InlineKeyboardMarkup]:
-    users = bus_stops.get_users(page)
-    total = bus_stops.get_user_count()
-    per_page = bus_stops._ADMIN_PAGE_SIZE
+async def _users_page_content(page: int) -> tuple[str, InlineKeyboardMarkup]:
+    users, total = await asyncio.gather(
+        asyncio.to_thread(bus_stops.get_users, page),
+        asyncio.to_thread(bus_stops.get_user_count),
+    )
+    per_page = bus_stops.ADMIN_PAGE_SIZE
     total_pages = max(1, (total + per_page - 1) // per_page)
 
     lines = [f"👥 <b>Users</b>  ·  {total} total\n"]
@@ -826,8 +848,8 @@ def _users_page_content(page: int) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-def _blocked_page_content() -> tuple[str, InlineKeyboardMarkup]:
-    blocked = bus_stops.get_blocked_users()
+async def _blocked_page_content() -> tuple[str, InlineKeyboardMarkup]:
+    blocked = await asyncio.to_thread(bus_stops.get_blocked_users)
     if not blocked:
         text = "🚫 <b>Blocked Users</b>\n\n<i>Nobody blocked.</i>"
     else:
@@ -863,34 +885,24 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "admin_home":
-        total = bus_stops.get_user_count()
-        blocked = len(bus_stops.get_blocked_users())
-        await query.edit_message_text(
-            f"🔧 <b>Admin Panel</b>\n\n"
-            f"👥 Users: <b>{total}</b>  ·  🚫 Blocked: <b>{blocked}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("👥 Users", callback_data="admin_users:0"),
-                InlineKeyboardButton("🚫 Blocked", callback_data="admin_blocked"),
-            ]]),
-        )
+        await _send_admin_home(query.edit_message_text)
         return
 
     if data.startswith("admin_users:"):
         page = int(data.split(":")[1])
-        text, kb = _users_page_content(page)
+        text, kb = await _users_page_content(page)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
     if data == "admin_blocked":
-        text, kb = _blocked_page_content()
+        text, kb = await _blocked_page_content()
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
     if data.startswith("admin_blk_ask:"):
         _, uid_str, page_str = data.split(":")
         uid = int(uid_str)
-        u = bus_stops.get_user(uid)
+        u = await asyncio.to_thread(bus_stops.get_user, uid)
         label = _h(_user_label(u) if u else f"#{uid}")
         full = _h((u or {}).get("full_name") or "")
         msgs = (u or {}).get("msg_count", "?")
@@ -908,21 +920,21 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("admin_blk_do:"):
         _, uid_str, page_str = data.split(":")
         uid = int(uid_str)
-        u = bus_stops.get_user(uid)
+        u = await asyncio.to_thread(bus_stops.get_user, uid)
         label = _user_label(u) if u else f"#{uid}"
-        bus_stops.block_user(uid)
+        await asyncio.to_thread(bus_stops.block_user, uid)
         await query.answer(f"🚫 {label} blocked", show_alert=True)
-        text, kb = _users_page_content(int(page_str))
+        text, kb = await _users_page_content(int(page_str))
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
     if data.startswith("admin_unblock:"):
         uid = int(data.split(":")[1])
-        u = bus_stops.get_user(uid)
+        u = await asyncio.to_thread(bus_stops.get_user, uid)
         label = _user_label(u) if u else f"#{uid}"
-        bus_stops.unblock_user(uid)
+        await asyncio.to_thread(bus_stops.unblock_user, uid)
         await query.answer(f"✅ {label} unblocked", show_alert=True)
-        text, kb = _blocked_page_content()
+        text, kb = await _blocked_page_content()
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
@@ -932,6 +944,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 # ---------------------------------------------------------------------------
 
 async def post_init(app: Application) -> None:
+    global _http_client
+    _http_client = httpx.AsyncClient(timeout=10)
     await bus_stops.ensure_loaded(LTA_API_KEY)
 
     public_commands = [
@@ -956,6 +970,11 @@ async def post_init(app: Application) -> None:
             )
 
 
+async def post_shutdown(app: Application) -> None:
+    if _http_client:
+        await _http_client.aclose()
+
+
 def main() -> None:
     persistence = PicklePersistence(filepath="data/bot_data.pickle")
     app = (
@@ -963,6 +982,7 @@ def main() -> None:
         .token(TELEGRAM_BOT_TOKEN)
         .persistence(persistence)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 

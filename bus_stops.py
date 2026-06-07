@@ -1,3 +1,4 @@
+import asyncio
 import math
 import sqlite3
 import logging
@@ -54,6 +55,9 @@ def init_db() -> None:
                 blocked_at TEXT NOT NULL
             )
         """)
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stops_lat_lon ON bus_stops (latitude, longitude)"
+        )
 
 
 async def fetch_and_store(api_key: str) -> int:
@@ -132,10 +136,12 @@ def clear_route_cache() -> None:
 
 
 async def ensure_route_loaded(api_key: str, service_no: str) -> None:
-    with _conn() as con:
-        count = con.execute(
-            "SELECT COUNT(*) FROM bus_routes WHERE service_no = ?", (service_no,)
-        ).fetchone()[0]
+    def _count():
+        with _conn() as con:
+            return con.execute(
+                "SELECT COUNT(*) FROM bus_routes WHERE service_no = ?", (service_no,)
+            ).fetchone()[0]
+    count = await asyncio.to_thread(_count)
     if count == 0:
         logger.info("Route cache miss for %s — fetching from LTA...", service_no)
         await fetch_and_store_route(api_key, service_no)
@@ -165,9 +171,11 @@ def get_route_for_stop(service_no: str, bus_stop_code: str) -> list[tuple[int, l
 
 
 async def ensure_loaded(api_key: str) -> None:
-    init_db()
-    with _conn() as con:
-        count = con.execute("SELECT COUNT(*) FROM bus_stops").fetchone()[0]
+    await asyncio.to_thread(init_db)
+    def _count():
+        with _conn() as con:
+            return con.execute("SELECT COUNT(*) FROM bus_stops").fetchone()[0]
+    count = await asyncio.to_thread(_count)
     if count < 100:
         logger.info("Bus stop DB empty — fetching from LTA...")
         await fetch_and_store(api_key)
@@ -262,11 +270,11 @@ def unblock_user(user_id: int) -> None:
         con.execute("DELETE FROM blocked_users WHERE user_id = ?", (user_id,))
 
 
-_ADMIN_PAGE_SIZE = 6
+ADMIN_PAGE_SIZE = 6
 
 
 def get_users(page: int = 0) -> list[dict]:
-    offset = page * _ADMIN_PAGE_SIZE
+    offset = page * ADMIN_PAGE_SIZE
     with _conn() as con:
         rows = con.execute(
             """SELECT u.user_id, u.username, u.full_name, u.last_seen, u.msg_count,
@@ -274,7 +282,7 @@ def get_users(page: int = 0) -> list[dict]:
                FROM users u
                ORDER BY u.last_seen DESC
                LIMIT ? OFFSET ?""",
-            (_ADMIN_PAGE_SIZE, offset),
+            (ADMIN_PAGE_SIZE, offset),
         ).fetchall()
     return [
         {
