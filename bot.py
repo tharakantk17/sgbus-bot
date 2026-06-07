@@ -2,6 +2,7 @@ import asyncio
 import html
 import os
 import logging
+import zoneinfo
 from datetime import datetime, timezone
 
 import httpx
@@ -119,7 +120,7 @@ def _format_services(data: dict) -> str:
         next3 = _format_next_bus(svc.get("NextBus3", {}))
         lines.append(f"<b>{svc_no}</b>  {next1}  {next2}  {next3}")
 
-    now_str = datetime.now().strftime("%-I:%M %p")
+    now_str = datetime.now(zoneinfo.ZoneInfo("Asia/Singapore")).strftime("%-I:%M %p")
 
     return (
         f"{header}\n\n"
@@ -518,7 +519,7 @@ async def _build_dashboard(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, Inl
                 rows.append(f"<b>{sno}</b>  {n1}  {n2}")
             sections.append(header + "\n" + "\n".join(rows))
 
-    now_str = datetime.now().strftime("%-I:%M %p")
+    now_str = datetime.now(zoneinfo.ZoneInfo("Asia/Singapore")).strftime("%-I:%M %p")
     text = (
         f"📊 <b>Dashboard</b>  <i>{now_str}</i>\n\n"
         + f"\n{divider}\n".join(sections)
@@ -647,10 +648,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
         divider = "──────────────────"
-        sections = [
-            _format_route_section(service_no, bus_stop_code, direction, stops)
+        sections = await asyncio.gather(*[
+            asyncio.to_thread(_format_route_section, service_no, bus_stop_code, direction, stops)
             for direction, stops in route_data
-        ]
+        ])
         await query.edit_message_text(
             f"\n{divider}\n".join(sections),
             parse_mode="HTML",
