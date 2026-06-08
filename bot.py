@@ -95,14 +95,16 @@ def _load_icon(load: str) -> str:
     return {"SEA": "🟢", "SDA": "🟡", "LSD": "🔴"}.get(load, "⚪")
 
 
-def _type_icon(bus_type: str) -> str:
-    return "♿" if bus_type == "WAB" else "🚌"
+def _type_icon(bus_type: str, feature: str = "") -> str:
+    wab = "♿" if feature == "WAB" else ""
+    bus = {"DD": "🚌🚌", "BD": "🚎", "SD": "🚌"}.get(bus_type, "🚌")
+    return f"{wab}{bus}"
 
 
 def _format_next_bus(bus: dict) -> str:
     arrival = _minutes_away(bus.get("EstimatedArrival", ""))
     load = _load_icon(bus.get("Load", ""))
-    btype = _type_icon(bus.get("Type", ""))
+    btype = _type_icon(bus.get("Type", ""), bus.get("Feature", ""))
     return f"{load}{btype} <b>{arrival}</b>"
 
 
@@ -132,7 +134,7 @@ async def _format_services(data: dict) -> str:
     return (
         f"{header}\n\n"
         + "\n".join(lines)
-        + f"\n\n<i>🟢 Seats  ·  🟡 Standing  ·  🔴 Full  ·  ♿ Accessible</i>"
+        + f"\n\n<i>🟢 Seats  ·  🟡 Standing  ·  🔴 Full  ·  ♿ Accessible  ·  🚌🚌 Double Deck  ·  🚎 Bendy</i>"
         + f"\n<i>🕐 {now_str}</i>"
     )
 
@@ -238,10 +240,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "3️⃣ <b>Targeted query</b> — transmit <code>83139 15</code>\n"
         "4️⃣ <b>Direct command</b> — <code>/stop 83139</code>\n"
         "5️⃣ <b>Dashboard</b> — tap <i>📊 Dashboard</i> or <code>/dashboard</code>\n\n"
-        "<b>Capacity indicators</b>\n"
-        "🟢 Seats available\n"
-        "🟡 Standing room only\n"
-        "🔴 Critical capacity\n\n"
+        "<b>Indicators</b>\n"
+        "🟢 Seats available  ·  🟡 Standing  ·  🔴 Critical capacity\n"
+        "♿ Wheelchair-accessible  ·  🚌🚌 Double Deck  ·  🚎 Bendy\n\n"
         "<b>Locating a stop code</b>\n"
         "The 5-digit identifier is on the physical stop signage, "
         "or share your location for a proximity scan.\n\n"
@@ -267,10 +268,8 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "📋 <b>Reading the arrival card</b>\n"
         "Each row shows the next 3 buses for a service:\n"
         "<code>65  🟢🚌 2m  🟡🚌 12m  🟢🚌 22m</code>\n\n"
-        "🟢 Seats available\n"
-        "🟡 Standing room only\n"
-        "🔴 Very full (limited boarding)\n"
-        "♿ Wheelchair-accessible bus\n"
+        "🟢 Seats available  ·  🟡 Standing only  ·  🔴 Very full\n"
+        "♿ Wheelchair-accessible (WAB)  ·  🚌🚌 Double Deck  ·  🚎 Bendy\n"
         "<b>Arr</b> = arriving now  ·  <b>–</b> = no data\n\n"
 
         "━━━━━━━━━━━━━━━━━━\n"
@@ -876,9 +875,9 @@ async def _blocked_page_content() -> tuple[str, InlineKeyboardMarkup]:
 
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    await query.answer()
     if update.effective_user.id not in ADMIN_USER_IDS:
         return
-    await query.answer()
     data = query.data
 
     if data == "noop":
