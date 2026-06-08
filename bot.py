@@ -97,7 +97,7 @@ def _load_icon(load: str) -> str:
 
 def _type_icon(bus_type: str, feature: str = "") -> str:
     wab = "♿" if feature == "WAB" else ""
-    bus = {"DD": "🚌🚌", "BD": "🚎", "SD": "🚌"}.get(bus_type, "🚌")
+    bus = {"DD": "🚌DD", "BD": "🚎", "SD": "🚌"}.get(bus_type, "🚌")
     return f"{wab}{bus}"
 
 
@@ -134,7 +134,7 @@ async def _format_services(data: dict) -> str:
     return (
         f"{header}\n\n"
         + "\n".join(lines)
-        + f"\n\n<i>🟢 Seats  ·  🟡 Standing  ·  🔴 Full  ·  ♿ Accessible  ·  🚌🚌 Double Deck  ·  🚎 Bendy</i>"
+        + f"\n\n<i>🟢 Seats  ·  🟡 Standing  ·  🔴 Full  ·  ♿ Accessible  ·  🚌DD Double Deck  ·  🚎 Bendy</i>"
         + f"\n<i>🕐 {now_str}</i>"
     )
 
@@ -242,7 +242,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "5️⃣ <b>Dashboard</b> — tap <i>📊 Dashboard</i> or <code>/dashboard</code>\n\n"
         "<b>Indicators</b>\n"
         "🟢 Seats available  ·  🟡 Standing  ·  🔴 Critical capacity\n"
-        "♿ Wheelchair-accessible  ·  🚌🚌 Double Deck  ·  🚎 Bendy\n\n"
+        "♿ Wheelchair-accessible  ·  🚌DD Double Deck  ·  🚎 Bendy\n\n"
         "<b>Locating a stop code</b>\n"
         "The 5-digit identifier is on the physical stop signage, "
         "or share your location for a proximity scan.\n\n"
@@ -269,7 +269,7 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Each row shows the next 3 buses for a service:\n"
         "<code>65  🟢🚌 2m  🟡🚌 12m  🟢🚌 22m</code>\n\n"
         "🟢 Seats available  ·  🟡 Standing only  ·  🔴 Very full\n"
-        "♿ Wheelchair-accessible (WAB)  ·  🚌🚌 Double Deck  ·  🚎 Bendy\n"
+        "♿ Wheelchair-accessible (WAB)  ·  🚌DD Double Deck  ·  🚎 Bendy\n"
         "<b>Arr</b> = arriving now  ·  <b>–</b> = no data\n\n"
 
         "━━━━━━━━━━━━━━━━━━\n"
